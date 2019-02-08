@@ -63,6 +63,16 @@ class EmailDB {
         fs.writeFileSync(DB_FILE, JSON.stringify(this.db, null, 4))
     }
 
+    lookupByRegexp(regexp: RegExp): DB {
+        const res = {}
+        for(const email in this.db) {
+            if(email.match(regexp)) {
+                res[email] = this.db[email]
+            }
+        }
+        return res
+    }
+
     lookup({
         tags,
         locale,
@@ -219,6 +229,17 @@ class EmailDB {
         }
         return res
     }
+
+    emailToString(email: Email): string {
+        const rec = this.db[email]
+        if(!rec) {
+            return `${email}: not found in db`
+        }
+        const locale = rec.locale || this.guessEmailLocale(email) || '?'
+        return `${email}: (${Array.from(rec.tags).join(',')}), ${locale}`
+    }
+
+
 }
 
 dotenv.config()
@@ -275,7 +296,7 @@ program
         })
         for(const email in result) {
             const rec = result[email]
-            log.info(`${email}: (${Array.from(rec.tags).join(',')}), ${rec.locale || '?'}`)
+            log.info(db.emailToString(email))
         }
         log.info(`${Object.keys(result).length} total`)
     })
@@ -397,6 +418,16 @@ program
         log.info(`${emails.length} delivered emails`)
         db.markAsClean(emails)
         db.save()
+    })
+
+program
+    .command('find_emails <regexp>')
+    .action(async (regexp) => {
+        const result = db.lookupByRegexp(new RegExp(regexp))
+        log.info(`found ${Object.keys(result).length}`)
+        for(const email in result) {
+            log.info(db.emailToString(email))
+        }
     })
 
 program.on('command:*', function () {
