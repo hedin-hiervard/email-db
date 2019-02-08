@@ -6,6 +6,8 @@ import { StreamLogger } from 'ual'
 import fs from 'fs-extra'
 import _ from 'lodash'
 import moment from 'moment'
+import Mailgun from 'mailgun-js'
+import dotenv from 'dotenv'
 
 const DB_FILE = 'data/db.json'
 const EmailRegex = /(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))/
@@ -21,7 +23,7 @@ type Record = {
     broken?: boolean,
 };
 
-type DB = { [ Email ]: Record }
+type DB = { [ Email ]: Record };
 
 class EmailDB {
     db: DB;
@@ -72,6 +74,9 @@ class EmailDB {
         const result = {}
         for(const email in this.db) {
             const rec = this.db[email]
+            if(rec.broken) {
+                continue
+            }
             const recTags = Array.from(rec.tags)
             if(_.intersection(recTags, inputTags).length < tags.size) {
                 continue
@@ -180,10 +185,25 @@ class EmailDB {
     totalEmails(): number {
         return Object.keys(this.db).length
     }
+
+    markAsBroken(emails: Array<Email>): number {
+        let res = 0
+        for(const email in this.db) {
+            const rec = this.db[email]
+            if(!rec.broken && emails.includes(email)) {
+                res++
+                rec.broken = true
+            }
+        }
+        return res
+    }
 }
+
+dotenv.config()
 
 const log = new StreamLogger({ stream: process.stdout })
 const db = new EmailDB()
+
 db.load()
 
 process.on('unhandledRejection', err => {
@@ -273,7 +293,56 @@ program
     .description('cleans the db of bad emails')
     .action(async () => {
         const { fixed, deleted } = db.cleanup()
-        log.debug(`${fixed} fixed, ${deleted} purged`)
+        log.info(`${fixed} fixed, ${deleted} purged`)
+        db.save()
+    })
+
+async function pageAll(
+    mg: *,
+    method: string,
+    limit: number
+): Promise<Array<*>> {
+    let result = []
+    let page = 0
+    let url
+    const fn = mg[method]().list.bind(mg[method]())
+    while(true) {
+        let response
+        if(url) {
+            response = await mg.get(url)
+        } else {
+            response = await fn({
+                limit,
+            })
+        }
+        if(response.items.length === 0) {
+            break
+        }
+        result = [ ...result, ...response.items ]
+        url = response.paging.next.split('https://api.mailgun.net/v3')[1]
+        page++
+    }
+    return result
+}
+
+program
+    .command('download_broken')
+    .description('asks mailgun for failed deliveries, complains and unsubscribes')
+    .action(async () => {
+        const mg = Mailgun({
+            apiKey: process.env.MAILGUN_API_KEY,
+            domain: process.env.MAILGUN_DOMAIN,
+            // testMode: true,
+        })
+        let emails = []
+        for(const supressType of [ 'unsubscribes', 'bounces', 'complaints' ]) {
+            log.info(`getting ${supressType}`)
+            const res = await pageAll(mg, supressType, 100)
+            log.info(`got ${res.length} ${supressType}`)
+            emails = [ ...emails, ...res.map(item => item.address) ]
+        }
+        const result = db.markAsBroken(emails)
+        log.info(`${result} emails marked as broken`)
         db.save()
     })
 
