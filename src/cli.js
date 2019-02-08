@@ -236,10 +236,18 @@ class EmailDB {
             return `${email}: not found in db`
         }
         const locale = rec.locale || this.guessEmailLocale(email) || '?'
-        return `${email}: (${Array.from(rec.tags).join(',')}), ${locale}`
+        let result = `${email}:`
+        if(rec.tags.size > 0) {
+            result += `(${Array.from(rec.tags).join(',')})`
+        }
+        result += `[${locale}]`
+        if(rec.clean) {
+            result += `(clean!)`
+        } else {
+            result += `(dirty)`
+        }
+        return result
     }
-
-
 }
 
 dotenv.config()
