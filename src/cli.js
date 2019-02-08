@@ -5,6 +5,7 @@ import program from 'commander'
 import { StreamLogger } from 'ual'
 import fs from 'fs-extra'
 import _ from 'lodash'
+import moment from 'moment'
 
 const DB_FILE = 'data/db.json'
 const EmailRegex = /(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))/
@@ -231,7 +232,30 @@ program
             log.info(`${email}: (${Array.from(rec.tags).join(',')}), ${rec.locale || '?'}`)
         }
         log.info(`${Object.keys(result).length} total`)
-        db.save()
+    })
+
+program
+    .command('export')
+    .option('--tag [tag]', 'tags', (val, memo) => { memo.push(val); return memo }, [])
+    .option('--locale [locale]', 'locale')
+    .description('queries email with tags')
+    .action(async ({ tag: tags, locale }) => {
+        log.info(`emails with ALL of the tags: ${tags.join(', ')}`)
+        if(locale) {
+            log.info(`locale: ${locale}`)
+        } else {
+            log.error('need to specify locale')
+            process.exit(1)
+        }
+        const result = db.lookup({
+            tags: new Set(tags || []),
+            locale,
+        })
+        const emails = Object.keys(result)
+        const ts = moment().format('YYYY-MM-DD:HH.MM')
+        const filename = `export/${tags.join(',')}-${locale}@${ts}.txt`
+        log.info(`saving ${emails.length} emails to ${filename}`)
+        fs.writeFileSync(filename, emails.join('\n'))
     })
 
 program
