@@ -46,6 +46,10 @@ class EmailDB {
         } catch(err) {
             this.db = {}
         }
+        for(const email in this.db) {
+            const rec = this.db[email]
+            rec.tags = new Set(rec.tags)
+        }
     }
 
     save() {
@@ -89,7 +93,7 @@ class EmailDB {
         let result = {}
         for(const email in this.db) {
             const rec = this.db[email]
-            for(const tag of rec.tags) {
+            for(const tag of Array.from(rec.tags)) {
                 if(!result[tag]) { result[tag] = 0 }
                 result[tag]++
             }
@@ -104,7 +108,15 @@ class EmailDB {
         return this.db[email].tags
     }
 
-    insert(filename: string, tags: Tags): {
+    insert({
+        filename,
+        tags,
+        locale,
+    }: {
+        filename: string,
+        tags: Tags,
+        locale?: Locale,
+    }): {
         inserted: number,
         updated: number,
     } {
@@ -121,11 +133,22 @@ class EmailDB {
             if(this.db[email] == null) {
                 this.db[email] = { tags: new Set() }
                 result.inserted++
-            } else {
-                result.updated++
             }
             const res = this.db[email]
+            let addedTags = false
+            for(const tag of Array.from(tags)) {
+                if(!res.tags.has(tag)) {
+                    res.tags.add(tag)
+                    addedTags = true
+                }
+            }
             res.tags = new Set([ ...res.tags, ...tags ])
+            if(addedTags || (locale && locale !== res.locale)) {
+                result.updated++
+            }
+            if(locale) {
+                res.locale = locale
+            }
         }
         return result
     }
@@ -177,10 +200,15 @@ process.on('uncaughtException', err => {
 program
     .command('insert <filename>')
     .option('--tag [tag]', 'tags', (val, memo) => { memo.push(val); return memo }, [])
+    .option('--locale [locale]', 'locale')
     .description('inserts all emails with one or more tags')
-    .action(async (filename, { tag: tags }) => {
-        const result = db.insert(filename, new Set(tags))
-        log.info(`inserted ${result.inserted} new emails, updated tags on ${result.updated} emails`)
+    .action(async (filename, { tag: tags, locale }) => {
+        const result = db.insert({
+            filename,
+            tags: new Set(tags),
+            locale,
+        })
+        log.info(`inserted ${result.inserted} new emails, updated ${result.updated} emails`)
         db.save()
     })
 
