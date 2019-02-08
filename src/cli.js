@@ -21,6 +21,7 @@ type Record = {
     tags: Tags,
     locale?: Locale,
     broken?: boolean,
+    clean?: boolean,
 };
 
 type DB = { [ Email ]: Record };
@@ -65,9 +66,13 @@ class EmailDB {
     lookup({
         tags,
         locale,
+        cleanOnly,
+        dirtyOnly,
     }: {
         tags: Tags,
         locale?: Locale,
+        cleanOnly?: boolean,
+        dirtyOnly?: boolean,
     }): DB {
         const inputTags = Array.from(tags)
 
@@ -75,6 +80,12 @@ class EmailDB {
         for(const email in this.db) {
             const rec = this.db[email]
             if(rec.broken) {
+                continue
+            }
+            if(!rec.clean && cleanOnly) {
+                continue
+            }
+            if(rec.clean && dirtyOnly) {
                 continue
             }
             const recTags = Array.from(rec.tags)
@@ -197,6 +208,17 @@ class EmailDB {
         }
         return res
     }
+    markAsClean(emails: Array<Email>): number {
+        let res = 0
+        for(const email in this.db) {
+            const rec = this.db[email]
+            if(!rec.clean && emails.includes(email)) {
+                res++
+                rec.clean = true
+            }
+        }
+        return res
+    }
 }
 
 dotenv.config()
@@ -237,8 +259,10 @@ program
     .command('query')
     .option('--tag [tag]', 'tags', (val, memo) => { memo.push(val); return memo }, [])
     .option('--locale [locale]', 'locale')
+    .option('--clean-only')
+    .option('--dirty-only')
     .description('queries email with tags')
-    .action(async ({ tag: tags, locale }) => {
+    .action(async ({ tag: tags, locale, cleanOnly, dirtyOnly }) => {
         log.info(`emails with ALL of the tags: ${tags.join(', ')}`)
         if(locale) {
             log.info(`locale: ${locale}`)
@@ -246,6 +270,8 @@ program
         const result = db.lookup({
             tags: new Set(tags || []),
             locale,
+            cleanOnly,
+            dirtyOnly,
         })
         for(const email in result) {
             const rec = result[email]
@@ -258,14 +284,13 @@ program
     .command('export')
     .option('--tag [tag]', 'tags', (val, memo) => { memo.push(val); return memo }, [])
     .option('--locale [locale]', 'locale')
+    .option('--clean-only')
+    .option('--dirty-only')
     .description('queries email with tags')
-    .action(async ({ tag: tags, locale }) => {
+    .action(async ({ tag: tags, locale, cleanOnly, dirtyOnly }) => {
         log.info(`emails with ALL of the tags: ${tags.join(', ')}`)
         if(locale) {
             log.info(`locale: ${locale}`)
-        } else {
-            log.error('need to specify locale')
-            process.exit(1)
         }
         const result = db.lookup({
             tags: new Set(tags || []),
@@ -273,7 +298,21 @@ program
         })
         const emails = Object.keys(result)
         const ts = moment().format('YYYY-MM-DD:HH.MM')
-        const filename = `export/${tags.join(',')}-${locale}@${ts}.txt`
+        let filename = `export/`
+        if(tags.length > 0) {
+            filename += `${tags.join(',')}`
+        }
+        if(locale) {
+            filename += `-${locale}`
+        }
+        if(cleanOnly) {
+            filename += `-clean`
+        }
+        if(dirtyOnly) {
+            filename += `-dirty`
+        }
+        filename += `@${ts}`
+        filename += `.txt`
         log.info(`saving ${emails.length} emails to ${filename}`)
         fs.writeFileSync(filename, emails.join('\n'))
     })
@@ -298,14 +337,13 @@ program
     })
 
 async function pageAll(
-    mg: *,
-    method: string,
-    limit: number
+    mg,
+    fn,
+    limit: number,
 ): Promise<Array<*>> {
     let result = []
-    let page = 0
     let url
-    const fn = mg[method]().list.bind(mg[method]())
+
     while(true) {
         let response
         if(url) {
@@ -320,7 +358,6 @@ async function pageAll(
         }
         result = [ ...result, ...response.items ]
         url = response.paging.next.split('https://api.mailgun.net/v3')[1]
-        page++
     }
     return result
 }
@@ -337,12 +374,28 @@ program
         let emails = []
         for(const supressType of [ 'unsubscribes', 'bounces', 'complaints' ]) {
             log.info(`getting ${supressType}`)
-            const res = await pageAll(mg, supressType, 100)
+            const res = await pageAll(mg, mg[supressType]().list.bind(mg[supressType]()), 100)
             log.info(`got ${res.length} ${supressType}`)
             emails = [ ...emails, ...res.map(item => item.address) ]
         }
         const result = db.markAsBroken(emails)
         log.info(`${result} emails marked as broken`)
+        db.save()
+    })
+
+program
+    .command('download_clean')
+    .action(async () => {
+        const mg = Mailgun({
+            apiKey: process.env.MAILGUN_API_KEY,
+            domain: process.env.MAILGUN_DOMAIN,
+        })
+        const response = await pageAll(mg, mg.events().get.bind(mg.events(), {
+            event: 'delivered',
+        }), 100)
+        const emails = _.uniq(response.map(item => item.recipient))
+        log.info(`${emails.length} delivered emails`)
+        db.markAsClean(emails)
         db.save()
     })
 
