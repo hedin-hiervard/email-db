@@ -8,6 +8,7 @@ import _ from 'lodash'
 import moment from 'moment'
 import Mailgun from 'mailgun-js'
 import dotenv from 'dotenv'
+import MailComposer from 'nodemailer/lib/mail-composer'
 
 const DB_FILE = 'data/db.json'
 const EmailRegex = /(([^<>()\[\]\\.,;:\s@"]+(\.[^<>()\[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))/
@@ -16,28 +17,53 @@ type Tag = string;
 type Email = string;
 type Tags = Set<Tag>;
 type Locale = string;
+type Status = 'dirty' | 'broken' | 'clean';
 
 type Record = {
     tags: Tags,
     locale?: Locale,
-    broken?: boolean,
-    clean?: boolean,
+    status: Status,
+    lastDelivered?: string,
 };
 
 type DB = { [ Email ]: Record };
 
 function filterEmail(line: string): ?Email {
-        const match = line.match(EmailRegex)
-        if(!match) {
-            return null
-        }
-        return match[0]
+    const match = line.match(EmailRegex)
+    if(!match) {
+        return null
     }
+    return match[0]
+}
+
+function readEmailFile(filename: string): Array<Email> {
+    log.info(`reading emails from ${filename}`)
+    const result = []
+    let lines
+    try {
+        lines = fs.readFileSync(filename, 'utf-8').split('\n')
+    } catch(err) {
+        return []
+    }
+
+    for(const line of lines) {
+        let email = filterEmail(line)
+        if(email) {
+            result.push(email)
+        }
+    }
+
+    log.info(`read ${result.length} emails`)
+    return result
+}
+
+function saveEmailFile(emails: Array<Email>, filename: string): void {
+    log.info(`saving ${emails.length} to ${filename}`)
+    fs.writeFileSync(filename, emails.join('\n'))
+}
 
 class EmailDB {
     db: DB;
-
-
 
     guessEmailLocale(email: Email): Locale {
         if(email.match(/\.ru$/)) {
@@ -55,6 +81,14 @@ class EmailDB {
         for(const email in this.db) {
             const rec = this.db[email]
             rec.tags = new Set(rec.tags)
+
+            if(rec.broken) {
+                rec.status = 'broken'
+            } else if(rec.clean) {
+                rec.status = 'clean'
+            }
+            delete rec.clean
+            delete rec.dirty
         }
     }
 
@@ -78,28 +112,35 @@ class EmailDB {
     lookup({
         tags,
         locale,
-        cleanOnly,
-        dirtyOnly,
+        statusOnly,
+        coldDays,
     }: {
         tags: Tags,
         locale?: Locale,
-        cleanOnly?: boolean,
-        dirtyOnly?: boolean,
+        statusOnly?: Status,
+        coldDays?: number,
     }): DB {
         const inputTags = Array.from(tags)
 
         const result = {}
         for(const email in this.db) {
             const rec = this.db[email]
-            if(rec.broken) {
+
+            if(statusOnly != null && rec.status !== statusOnly) {
                 continue
             }
-            if(!rec.clean && cleanOnly) {
+            if((statusOnly == null || statusOnly !== 'broken') &&
+                rec.status === 'broken') {
                 continue
             }
-            if(rec.clean && dirtyOnly) {
-                continue
+
+            if(coldDays && rec.lastDelivered) {
+                const d = moment().diff(rec.lastDelivered, 'days')
+                if(d < coldDays) {
+                    continue
+                }
             }
+
             const recTags = Array.from(rec.tags)
             if(_.intersection(recTags, inputTags).length < tags.size) {
                 continue
@@ -160,7 +201,10 @@ class EmailDB {
                 continue
             }
             if(this.db[email] == null) {
-                this.db[email] = { tags: new Set() }
+                this.db[email] = {
+                    tags: new Set(),
+                    status: 'dirty',
+                }
                 result.inserted++
             }
             const res = this.db[email]
@@ -209,27 +253,27 @@ class EmailDB {
         return Object.keys(this.db).length
     }
 
-    markAsBroken(emails: Array<Email>): number {
+    setStatus(emails: Array<Email>, status: Status): number {
         let res = 0
         for(const email in this.db) {
             const rec = this.db[email]
             if(emails.includes(email)) {
-                if(!rec.broken) {
+                if(rec.status !== status) {
                     res++
                 }
-                rec.broken = true
+                rec.status = status
             }
         }
         return res
     }
-    markAsClean(emails: Array<Email>): number {
+
+    setLastDelivered(emails: Array<Email>, lastDelivered: *): number {
         let res = 0
         for(const email in this.db) {
             const rec = this.db[email]
-            if(!rec.clean && emails.includes(email)) {
+            if(emails.includes(email)) {
                 res++
-                rec.clean = true
-                delete rec.broken
+                rec.lastDelivered = lastDelivered.format()
             }
         }
         return res
@@ -246,13 +290,9 @@ class EmailDB {
             result += `(${Array.from(rec.tags).join(',')})`
         }
         result += `[${locale}]`
-        if(rec.clean) {
-            result += `(clean!)`
-        } else {
-            result += `(dirty)`
-        }
-        if(rec.broken) {
-            result += `[ !! BROKEN !! ]`
+        result += `(${rec.status})`
+        if(rec.lastDelivered) {
+            result += `[lastSent:${rec.lastDelivered}]`
         }
         return result
     }
@@ -296,19 +336,24 @@ program
     .command('query')
     .option('--tag [tag]', 'tags', (val, memo) => { memo.push(val); return memo }, [])
     .option('--locale [locale]', 'locale')
-    .option('--clean-only')
-    .option('--dirty-only')
+    .option('--status <status>')
+    .option('--cold-days <coldDays>')
     .description('queries email with tags')
-    .action(async ({ tag: tags, locale, cleanOnly, dirtyOnly }) => {
+    .action(async ({ tag: tags, locale, status, coldDays }) => {
         log.info(`emails with ALL of the tags: ${tags.join(', ')}`)
         if(locale) {
             log.info(`locale: ${locale}`)
         }
+        if(status && !['clean', 'dirty', 'broken'].includes(status)) {
+            log.error('invalid status')
+            process.exit(1)
+        }
+
         const result = db.lookup({
             tags: new Set(tags || []),
             locale,
-            cleanOnly,
-            dirtyOnly,
+            statusOnly: status,
+            coldDays,
         })
         for(const email in result) {
             log.info(db.emailToString(email))
@@ -322,7 +367,7 @@ function makeFilename(
         [ string ]: *,
     }
 ): string {
-    const ts = moment().format('YYYY-MM-DD:HH.MM')
+    const ts = moment().format('YYYY-MM-DD-HH.MM')
 
     let filename = `${base}/`
     const tokens = [ ts ]
@@ -336,48 +381,35 @@ function makeFilename(
         } else {
             str = input[inputId]
         }
-        tokens.push(`${inputId}:${str.toString()}`)
+        tokens.push(`${inputId}=${str.toString()}`)
     }
-    filename += `${tokens.join('-')}`
+    filename += `${tokens.join(',')}`
 
     filename += `.txt`
     return filename
-}
-
-function readEmailFile(filename: string): Array<Email> {
-    const result = []
-    let lines
-    try {
-        lines = fs.readFileSync(filename, 'utf-8').split('\n')
-    } catch(err) {
-        return []
-    }
-
-    for(const line of lines) {
-        let email = filterEmail(line)
-        if(email) {
-            result.push(email)
-        }
-    }
-
-    return result
 }
 
 program
     .command('export')
     .option('--tag [tag]', 'tags', (val, memo) => { memo.push(val); return memo }, [])
     .option('--locale [locale]', 'locale')
-    .option('--clean-only')
-    .option('--dirty-only')
+    .option('--status <status>')
+    .option('--cold-days <coldDays>')
     .description('queries email with tags')
-    .action(async ({ tag: tags, locale, cleanOnly, dirtyOnly }) => {
+    .action(async ({ tag: tags, locale, status, coldDays }) => {
         log.info(`emails with ALL of the tags: ${tags.join(', ')}`)
         if(locale) {
             log.info(`locale: ${locale}`)
         }
+        if(status && !['clean', 'dirty', 'broken'].includes(status)) {
+            log.error('invalid status')
+            process.exit(1)
+        }
         const result = db.lookup({
             tags: new Set(tags || []),
             locale,
+            statusOnly: status,
+            coldDays,
         })
         const emails = Object.keys(result)
         const filename = makeFilename(
@@ -385,12 +417,11 @@ program
             {
                 tags,
                 locale,
-                cleanOnly,
-                dirtyOnly,
+                statusOnly: status,
+                coldDays,
             }
         )
-        log.info(`saving ${emails.length} emails to ${filename}`)
-        fs.writeFileSync(filename, emails.join('\n'))
+        saveEmailFile(emails, filename)
     })
 
 program
@@ -445,7 +476,6 @@ program
         const mg = Mailgun({
             apiKey: process.env.MAILGUN_API_KEY,
             domain: process.env.MAILGUN_DOMAIN,
-            // testMode: true,
         })
         let emails = []
         for(const supressType of [ 'unsubscribes', 'bounces', 'complaints' ]) {
@@ -454,8 +484,18 @@ program
             log.info(`got ${res.length} ${supressType}`)
             emails = [ ...emails, ...res.map(item => item.address) ]
         }
-        const result = db.markAsBroken(emails)
-        log.info(`${result} emails marked as broken`)
+        const filename = makeFilename('downloaded', {
+            broken: true,
+        })
+        saveEmailFile(emails, filename)
+    })
+
+program
+    .command('set_delivered_now <filename>')
+    .action(async (filename) => {
+        const emails = readEmailFile(filename)
+        const res = db.setLastDelivered(emails, moment())
+        log.info(`${res} emails updated`)
         db.save()
     })
 
@@ -474,27 +514,26 @@ program
         const filename = makeFilename('downloaded', {
             delivered: true,
         })
-        log.info(`saving to ${filename}`)
-        fs.writeFileSync(filename, emails.join('\n'))
+        saveEmailFile(emails, filename)
     })
 
 program
     .command('mark_clean <filename>')
     .action(async (filename) => {
-        log.info(`reading from ${filename}`)
         const emails = readEmailFile(filename)
-        log.info(`read ${emails.length} emails, marking clean`)
-        db.markAsClean(emails)
+        log.info(`marking clean`)
+        const res = db.setStatus(emails, 'clean')
+        log.info(`${res} changed status`)
         db.save()
     })
 
 program
     .command('mark_broken <filename>')
     .action(async (filename) => {
-        log.info(`reading from ${filename}`)
         const emails = readEmailFile(filename)
-        log.info(`read ${emails.length} emails, marking BROKEN`)
-        db.markAsBroken(emails)
+        log.info(`marking BROKEN`)
+        const res = db.setStatus(emails, 'broken')
+        log.info(`${res} changed status`)
         db.save()
     })
 
@@ -506,6 +545,42 @@ program
         for(const email in result) {
             log.info(db.emailToString(email))
         }
+    })
+
+program
+    .command('send <listName> <subject> <htmlFile>')
+    .action(async (listName, subject, htmlFile) => {
+        const html = fs.readFileSync(htmlFile)
+
+        if(process.env.MAILGUN_DOMAIN == null) {
+            log.error(`set MAILGUN_DOMAIN env var`)
+            return
+        }
+
+        const to = `${listName}@${process.env.MAILGUN_DOMAIN}`
+        const mailOptions = {
+            from: process.env.FROM_ADDRESS,
+            to,
+            subject,
+            text: '',
+            html,
+        }
+        var mail = new MailComposer(mailOptions)
+
+        const message = await mail.compile().build()
+
+        const dataToSend = {
+            to,
+            message: message.toString('ascii'),
+        }
+
+        const mg = Mailgun({
+            apiKey: process.env.MAILGUN_API_KEY,
+            domain: process.env.MAILGUN_DOMAIN,
+        })
+
+        const result = await mg.messages().sendMime(dataToSend)
+        log.info(result)
     })
 
 program.on('command:*', function () {

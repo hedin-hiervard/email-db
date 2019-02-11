@@ -33,6 +33,7 @@
     "lodash": "^4.17.11",
     "mailgun-js": "^0.22.0",
     "moment": "^2.22.2",
+    "nodemailer": "^5.1.1",
     "ual": "^0.1.0",
     "youch": "^2.0.9",
     "youch-terminal": "^1.0.0"
