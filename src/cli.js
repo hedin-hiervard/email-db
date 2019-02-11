@@ -269,12 +269,13 @@ class EmailDB {
 
     setLastDelivered(emails: Array<Email>, lastDelivered: *): number {
         let res = 0
-        for(const email in this.db) {
+        for(const email of emails) {
             const rec = this.db[email]
-            if(emails.includes(email)) {
-                res++
-                rec.lastDelivered = lastDelivered.format()
+            if(!rec) {
+                continue
             }
+            res++
+            rec.lastDelivered = lastDelivered.format()
         }
         return res
     }
@@ -500,7 +501,7 @@ program
     })
 
 program
-    .command('download_delivered')
+    .command('update_delivered')
     .action(async () => {
         const mg = Mailgun({
             apiKey: process.env.MAILGUN_API_KEY,
@@ -515,6 +516,14 @@ program
             delivered: true,
         })
         saveEmailFile(emails, filename)
+
+        let res = 0
+        for(const item of response) {
+            const ts = moment.utc(item.timestamp * 1000)
+            res += db.setLastDelivered([ item.recipient ], ts)
+        }
+        log.info(`${res} emails updated`)
+        db.save()
     })
 
 program
