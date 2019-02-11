@@ -6,6 +6,7 @@ backup/
 data/*
 settings/*
 export/*
+downloaded/*
 
 deploy.sh
 .DS_Store

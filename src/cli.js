@@ -26,16 +26,18 @@ type Record = {
 
 type DB = { [ Email ]: Record };
 
-class EmailDB {
-    db: DB;
-
-    filter(line: string): ?Email {
+function filterEmail(line: string): ?Email {
         const match = line.match(EmailRegex)
         if(!match) {
             return null
         }
         return match[0]
     }
+
+class EmailDB {
+    db: DB;
+
+
 
     guessEmailLocale(email: Email): Locale {
         if(email.match(/\.ru$/)) {
@@ -153,7 +155,7 @@ class EmailDB {
         }
         const lines = fs.readFileSync(filename, 'utf-8').split('\n')
         for(let line of lines) {
-            const email = this.filter(line)
+            const email = filterEmail(line)
             if(!email) {
                 continue
             }
@@ -190,7 +192,7 @@ class EmailDB {
         }
         for(const email in this.db) {
             const rec = this.db[email]
-            const filtered = this.filter(email)
+            const filtered = filterEmail(email)
             if(!filtered) {
                 delete this.db[email]
                 result.deleted++
@@ -211,8 +213,10 @@ class EmailDB {
         let res = 0
         for(const email in this.db) {
             const rec = this.db[email]
-            if(!rec.broken && emails.includes(email)) {
-                res++
+            if(emails.includes(email)) {
+                if(!rec.broken) {
+                    res++
+                }
                 rec.broken = true
             }
         }
@@ -225,6 +229,7 @@ class EmailDB {
             if(!rec.clean && emails.includes(email)) {
                 res++
                 rec.clean = true
+                delete rec.broken
             }
         }
         return res
@@ -245,6 +250,9 @@ class EmailDB {
             result += `(clean!)`
         } else {
             result += `(dirty)`
+        }
+        if(rec.broken) {
+            result += `[ !! BROKEN !! ]`
         }
         return result
     }
@@ -303,11 +311,57 @@ program
             dirtyOnly,
         })
         for(const email in result) {
-            const rec = result[email]
             log.info(db.emailToString(email))
         }
         log.info(`${Object.keys(result).length} total`)
     })
+
+function makeFilename(
+    base: string,
+    input: {
+        [ string ]: *,
+    }
+): string {
+    const ts = moment().format('YYYY-MM-DD:HH.MM')
+
+    let filename = `${base}/`
+    const tokens = [ ts ]
+    for(const inputId in input) {
+        let str
+        if(input[inputId] == null) {
+            continue
+        }
+        if(Array.isArray(input[inputId])) {
+            str = input[inputId].join(',')
+        } else {
+            str = input[inputId]
+        }
+        tokens.push(`${inputId}:${str.toString()}`)
+    }
+    filename += `${tokens.join('-')}`
+
+    filename += `.txt`
+    return filename
+}
+
+function readEmailFile(filename: string): Array<Email> {
+    const result = []
+    let lines
+    try {
+        lines = fs.readFileSync(filename, 'utf-8').split('\n')
+    } catch(err) {
+        return []
+    }
+
+    for(const line of lines) {
+        let email = filterEmail(line)
+        if(email) {
+            result.push(email)
+        }
+    }
+
+    return result
+}
 
 program
     .command('export')
@@ -326,22 +380,15 @@ program
             locale,
         })
         const emails = Object.keys(result)
-        const ts = moment().format('YYYY-MM-DD:HH.MM')
-        let filename = `export/`
-        if(tags.length > 0) {
-            filename += `${tags.join(',')}`
-        }
-        if(locale) {
-            filename += `-${locale}`
-        }
-        if(cleanOnly) {
-            filename += `-clean`
-        }
-        if(dirtyOnly) {
-            filename += `-dirty`
-        }
-        filename += `@${ts}`
-        filename += `.txt`
+        const filename = makeFilename(
+            'export',
+            {
+                tags,
+                locale,
+                cleanOnly,
+                dirtyOnly,
+            }
+        )
         log.info(`saving ${emails.length} emails to ${filename}`)
         fs.writeFileSync(filename, emails.join('\n'))
     })
@@ -413,7 +460,7 @@ program
     })
 
 program
-    .command('download_clean')
+    .command('download_delivered')
     .action(async () => {
         const mg = Mailgun({
             apiKey: process.env.MAILGUN_API_KEY,
@@ -424,7 +471,30 @@ program
         }), 100)
         const emails = _.uniq(response.map(item => item.recipient))
         log.info(`${emails.length} delivered emails`)
+        const filename = makeFilename('downloaded', {
+            delivered: true,
+        })
+        log.info(`saving to ${filename}`)
+        fs.writeFileSync(filename, emails.join('\n'))
+    })
+
+program
+    .command('mark_clean <filename>')
+    .action(async (filename) => {
+        log.info(`reading from ${filename}`)
+        const emails = readEmailFile(filename)
+        log.info(`read ${emails.length} emails, marking clean`)
         db.markAsClean(emails)
+        db.save()
+    })
+
+program
+    .command('mark_broken <filename>')
+    .action(async (filename) => {
+        log.info(`reading from ${filename}`)
+        const emails = readEmailFile(filename)
+        log.info(`read ${emails.length} emails, marking BROKEN`)
+        db.markAsBroken(emails)
         db.save()
     })
 
